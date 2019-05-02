@@ -194,7 +194,7 @@ type Viper struct {
 	override       map[string]interface{}
 	defaults       map[string]interface{}
 	kvstore        map[string]interface{}
-	pflags         map[string]FlagValue
+	pflags         map[string]interface{}
 	env            map[string]string
 	aliases        map[string]string
 	typeByDefValue bool
@@ -217,7 +217,7 @@ func New() *Viper {
 	v.override = make(map[string]interface{})
 	v.defaults = make(map[string]interface{})
 	v.kvstore = make(map[string]interface{})
-	v.pflags = make(map[string]FlagValue)
+	v.pflags = make(map[string]interface{})
 	v.env = make(map[string]string)
 	v.aliases = make(map[string]string)
 	v.typeByDefValue = false
@@ -938,7 +938,15 @@ func (v *Viper) BindFlagValue(key string, flag FlagValue) error {
 	if flag == nil {
 		return fmt.Errorf("flag for %q is nil", key)
 	}
-	v.pflags[strings.ToLower(key)] = flag
+	// If alias passed in, then set the proper override
+	key = v.realKey(strings.ToLower(key))
+
+	path := strings.Split(key, v.keyDelim)
+	lastKey := strings.ToLower(path[len(path)-1])
+	deepestMap := deepSearch(v.pflags, path[:len(path)-1])
+
+	// set innermost value
+	deepestMap[lastKey] = flag
 	return nil
 }
 
@@ -1000,23 +1008,12 @@ func (v *Viper) find(lcaseKey string) interface{} {
 	}
 
 	// PFlag override next
-	flag, exists := v.pflags[lcaseKey]
-	if exists && flag.HasChanged() {
-		switch flag.ValueType() {
-		case "int", "int8", "int16", "int32", "int64":
-			return cast.ToInt(flag.ValueString())
-		case "bool":
-			return cast.ToBool(flag.ValueString())
-		case "stringSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return res
-		default:
-			return flag.ValueString()
+	if val = v.searchMap(v.pflags, path); val != nil {
+		if flag := val.(FlagValue); flag.HasChanged() {
+			return getFlagVal(flag)
 		}
 	}
-	if nested && v.isPathShadowedInFlatMap(path, v.pflags) != "" {
+	if nested && v.isPathShadowedInDeepMap(path, v.pflags) != "" {
 		return nil
 	}
 
@@ -1070,24 +1067,28 @@ func (v *Viper) find(lcaseKey string) interface{} {
 
 	// last chance: if no other value is returned and a flag does exist for the value,
 	// get the flag's value even if the flag's value has not changed
-	if flag, exists := v.pflags[lcaseKey]; exists {
-		switch flag.ValueType() {
-		case "int", "int8", "int16", "int32", "int64":
-			return cast.ToInt(flag.ValueString())
-		case "bool":
-			return cast.ToBool(flag.ValueString())
-		case "stringSlice":
-			s := strings.TrimPrefix(flag.ValueString(), "[")
-			s = strings.TrimSuffix(s, "]")
-			res, _ := readAsCSV(s)
-			return res
-		default:
-			return flag.ValueString()
-		}
+	if val = v.searchMap(v.pflags, path); val != nil {
+		flag := val.(FlagValue)
+		return getFlagVal(flag)
 	}
 	// last item, no need to check shadowing
 
 	return nil
+}
+
+func getFlagVal(flag FlagValue) interface{} {
+	switch flag.ValueType() {
+	case "int", "int8", "int16", "int32", "int64":
+		return cast.ToInt(flag.ValueString())
+	case "bool":
+		return cast.ToBool(flag.ValueString())
+	case "stringSlice":
+		s := strings.TrimPrefix(flag.ValueString(), "[")
+		s = strings.TrimSuffix(s, "]")
+		res, _ := readAsCSV(s)
+		return res
+	}
+	return flag.ValueString()
 }
 
 func readAsCSV(val string) ([]string, error) {
@@ -1672,7 +1673,7 @@ func (v *Viper) AllKeys() []string {
 	// add all paths, by order of descending priority to ensure correct shadowing
 	m = v.flattenAndMergeMap(m, castMapStringToMapInterface(v.aliases), "")
 	m = v.flattenAndMergeMap(m, v.override, "")
-	m = v.mergeFlatMap(m, castMapFlagToMapInterface(v.pflags))
+	m = v.flattenAndMergeMap(m, v.pflags, "")
 	m = v.mergeFlatMap(m, castMapStringToMapInterface(v.env))
 	m = v.flattenAndMergeMap(m, v.config, "")
 	m = v.flattenAndMergeMap(m, v.kvstore, "")
